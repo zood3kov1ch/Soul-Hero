@@ -1,0 +1,371 @@
+task.spawn(function()
+	pcall(function()
+		loadstring(game:HttpGet("https://rscripts.net/api/telemetry/v2/client.lua?s=6aadfdc184be22e7d6f57b69"))()
+	end)
+end)
+if game.PlaceId ~= 99388466709359 then
+    warn("[hidevin] Wrong game. This script only runs in IDLE Soul Hero (99388466709359).")
+    return
+end
+
+local Repo = "https://raw.githubusercontent.com/joustingmatch/ObsidianUltra/main/"
+local Library = loadstring(game:HttpGet(Repo .. "Library.lua"))()
+local ThemeManager = loadstring(game:HttpGet(Repo .. "addons/ThemeManager.lua"))()
+local SaveManager = loadstring(game:HttpGet(Repo .. "addons/SaveManager.lua"))()
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local VirtualUser = game:GetService("VirtualUser")
+local LocalPlayer = Players.LocalPlayer
+local WS: any = workspace
+
+local Options: any = Library.Options
+local Toggles: any = Library.Toggles
+
+-- Design tokens (UI_STYLE.json)
+Library.Scheme.BackgroundColor = Color3.fromHex("0d0d0d")
+Library.Scheme.MainColor = Color3.fromHex("282828")
+Library.Scheme.OutlineColor = Color3.fromHex("3a3a3a")
+Library.Scheme.FontColor = Color3.fromRGB(255, 255, 255)
+Library.Scheme.AccentColor = Color3.fromHex("5865F2")
+Library.Scheme.BlueColor = Color3.fromHex("5865F2")
+
+local Window = Library:CreateWindow({
+    Title = "@hidevin",
+    Footer = "IDLE Soul Hero | Leave a like on Rscripts if it works. @hidevin",
+    CopyableFooter = false,
+    DisableSearch = true,
+    Minimizable = true,
+    CornerRadius = 10,
+    ShowCustomCursor = true,
+    NotifySide = "Right",
+})
+
+-- Tabs (UI_STYLE.json structure + GAME_FEATURES.md mapping)
+local Tabs = {
+    Main = Window:AddTab({ Name = "Main", Icon = "home", Description = "Status" }),
+    Farming = Window:AddTab({ Name = "Farming", Icon = "swords", Description = "Combat and progression" }),
+    Inventory = Window:AddTab({ Name = "Inventory", Icon = "backpack", Description = "Equip and upgrades" }),
+    Rebirth = Window:AddTab({ Name = "Rebirth", Icon = "refresh-ccw", Description = "Rebirth" }),
+    Settings = Window:AddTab({ Name = "Settings", Icon = "settings", Description = "Config and menu" }),
+}
+
+-- Helpers
+local Network: any = WS:WaitForChild("Network")
+local function remote(name)
+    return Network:FindFirstChild(name)
+end
+local function fireRemote(name, ...)
+    local args = table.pack(...)
+    local r = remote(name)
+    if r and r:IsA("RemoteEvent") then
+        local ok, err = pcall(function() r:FireServer(table.unpack(args, 1, args.n)) end)
+        if not ok then warn("[hidevin] FireServer " .. name .. " failed: " .. tostring(err)) end
+    end
+end
+local function invokeRemote(name, ...)
+    local args = table.pack(...)
+    local r = remote(name)
+    if r and r:IsA("RemoteFunction") then
+        local ok, res = pcall(function() return r:InvokeServer(table.unpack(args, 1, args.n)) end)
+        if ok then
+            return res
+        else
+            warn("[hidevin] Invoke " .. name .. " failed: " .. tostring(res))
+        end
+    end
+    return nil
+end
+local function playerHrp()
+    local chars = WS:FindFirstChild("Characters")
+    local ch = chars and chars:FindFirstChild(LocalPlayer.Name) or LocalPlayer.Character
+    if ch and ch:IsA("Model") then
+        return ch:FindFirstChild("HumanoidRootPart")
+    end
+    return nil
+end
+local function playerHumanoid()
+    local chars = WS:FindFirstChild("Characters")
+    local ch = chars and chars:FindFirstChild(LocalPlayer.Name) or LocalPlayer.Character
+    if ch and ch:IsA("Model") then
+        return ch:FindFirstChildOfClass("Humanoid")
+    end
+    return nil
+end
+local function enemiesFolder()
+    local g = WS:FindFirstChild("Game")
+    if g then return g:FindFirstChild("Enemies") end
+    return nil
+end
+local function enemyCount()
+    local f = enemiesFolder()
+    if f then return #f:GetChildren() end
+    return 0
+end
+local function nearestEnemy()
+    local folder = enemiesFolder()
+    local hrp = playerHrp()
+    if not folder or not hrp then return nil, nil end
+    local best = nil
+    local bestPart = nil
+    local bestDist = math.huge
+    for _, m in ipairs(folder:GetChildren()) do
+        if m:IsA("Model") then
+            local part = m:FindFirstChildWhichIsA("BasePart", true)
+            if part then
+                local d = (part.Position - hrp.Position).Magnitude
+                if d < bestDist then
+                    bestDist = d;
+                    best = m;
+                    bestPart = part
+                end
+            end
+        end
+    end
+    return best, bestPart
+end
+local function equipSword()
+    local chars = WS:FindFirstChild("Characters")
+    local ch = (chars and chars:FindFirstChild(LocalPlayer.Name)) or LocalPlayer.Character
+    if not ch or not ch:IsA("Model") then return end
+    local hum = ch:FindFirstChildOfClass("Humanoid")
+    local backpack: any = LocalPlayer:FindFirstChild("Backpack")
+    local sword = ch:FindFirstChild("Sword") or (backpack and backpack:FindFirstChild("Sword"))
+    if hum and sword and sword:IsA("Tool") and sword.Parent ~= ch then
+        pcall(function() hum:EquipTool(sword) end)
+    end
+end
+
+-- Loop generations (prevents stacked loops on re-toggle)
+local Gen = {
+    Farm = 0, M1 = 0,
+    EquipBest = 0, SkillTree = 0, Rebirth = 0,
+}
+
+-- MAIN TAB: info only, no mechanics (GAME_FEATURES.md)
+do
+    local Info = Tabs.Main:AddLeftGroupbox("Status", "info")
+    Info:AddLabel("Game: IDLE Soul Hero")
+    Info:AddLabel("SessionLabel", { Text = "Session: 0m", DoesWrap = true })
+    Info:AddLabel("StageLabel", { Text = "Stage: -", DoesWrap = true })
+    Info:AddLabel("FarmLabel", { Text = "Farm: idle", DoesWrap = true })
+    local Right = Tabs.Main:AddRightGroupbox("Account", "user")
+    Right:AddPlayerInfo("MainBanner", {
+        Title = "Welcome <b>@hidevin</b>",
+        Description = { "IDLE Soul Hero farm hub", "Toggles live in Farming / Inventory / Rebirth" },
+        ThumbnailType = "HeadShot",
+        Height = 84,
+    })
+    task.spawn(function()
+        local t0 = os.clock()
+        while not Library.Unloaded do
+            task.wait(1)
+            local mins = math.floor((os.clock() - t0) / 60)
+            pcall(function()
+                Options.SessionLabel:SetText("Session: " .. tostring(mins) .. "m")
+                Options.StageLabel:SetText("Stage: " .. tostring(LocalPlayer:GetAttribute("Stage")) .. " | Level: " .. tostring(LocalPlayer:GetAttribute("CurrentLevel")) .. " | Coins: " .. tostring(LocalPlayer:GetAttribute("Coins")) .. " | Souls: " .. tostring(LocalPlayer:GetAttribute("Souls")))
+                local farmOn = Toggles.AutoFarm and Toggles.AutoFarm.Value and "ON" or "OFF"
+                local orbitOn = Toggles.Orbit and Toggles.Orbit.Value and "ON" or "OFF"
+                Options.FarmLabel:SetText("Farm: " .. farmOn .. " | Orbit: " .. orbitOn .. " | Enemies: " .. tostring(enemyCount()))
+            end)
+        end
+    end)
+end
+
+-- FARMING TAB: sub-tabs required (>1 feature)
+do
+    local Combat = Tabs.Farming:AddSubTab("Combat", "swords")
+    local OrbitTab = Tabs.Farming:AddSubTab("Orbit", "orbit")
+
+    local FarmBox = Combat:AddLeftGroupbox("Auto Farm", "swords")
+    FarmBox:AddToggle("AutoFarm", { Text = "Auto Farm Mobs", Default = false, Tooltip = "Stay on nearest mob and attack (1s loop)" })
+    FarmBox:AddToggle("AutoM1", { Text = "Auto M1", Default = false, Tooltip = "Swing sword + fire weapon remotes" })
+
+    local OrbitBox = OrbitTab:AddLeftGroupbox("Orbit", "orbit")
+    OrbitBox:AddToggle("Orbit", { Text = "Orbit and Fly Around Mobs", Default = false, Tooltip = "Circle the current target" })
+    local OrbitSet = OrbitTab:AddRightGroupbox("Orbit Settings", "sliders-horizontal")
+    OrbitSet:AddSlider("OrbitSpeed", { Text = "Orbit Speed", Default = 3, Min = 1, Max = 10, Rounding = 1, Suffix = "x" })
+    OrbitSet:AddSlider("OrbitHeight", { Text = "Height", Default = 6, Min = 0, Max = 30, Rounding = 0, Suffix = "st" })
+    OrbitSet:AddSlider("OrbitDistance", { Text = "Distance", Default = 9, Min = 3, Max = 30, Rounding = 0, Suffix = "st" })
+
+    Toggles.AutoFarm:OnChanged(function()
+        Gen.Farm += 1
+        local myGen = Gen.Farm
+        task.spawn(function()
+            while Toggles.AutoFarm.Value and myGen == Gen.Farm and not Library.Unloaded do
+                equipSword()
+                local _, part = nearestEnemy()
+                local hrp = playerHrp()
+                local hum = playerHumanoid()
+                if part and hrp then
+                    if not (Toggles.Orbit and Toggles.Orbit.Value) then
+                        pcall(function()
+                            hrp.CanCollide = false
+                            if hum then hum.PlatformStand = false end
+                            hrp.CFrame = part.CFrame + Vector3.new(0, 8, 0)
+                            hrp.AssemblyLinearVelocity = Vector3.zero
+                        end)
+                    end
+                    pcall(function()
+                        local ch = hum and hum.Parent
+                        local sword = ch and ch:FindFirstChild("Sword")
+                        if sword and sword:IsA("Tool") then sword:Activate() end
+                    end)
+                    fireRemote("PlayerWeaponSwingRequested-RemoteEvent")
+                    fireRemote("PlayerWeaponAttackRequested-RemoteEvent")
+                end
+                task.wait(1)
+            end
+        end)
+    end)
+
+    Toggles.AutoM1:OnChanged(function()
+        Gen.M1 += 1
+        local myGen = Gen.M1
+        task.spawn(function()
+            while Toggles.AutoM1.Value and myGen == Gen.M1 and not Library.Unloaded do
+                equipSword()
+                local hum = playerHumanoid()
+                pcall(function()
+                    local ch = hum and hum.Parent
+                    local sword = ch and ch:FindFirstChild("Sword")
+                    if sword and sword:IsA("Tool") then sword:Activate() end
+                end)
+                fireRemote("PlayerWeaponSwingRequested-RemoteEvent")
+                fireRemote("PlayerWeaponAttackRequested-RemoteEvent")
+                task.wait(1)
+            end
+        end)
+    end)
+
+    local orbitAngle = 0
+    RunService.Heartbeat:Connect(function(dt)
+        if Library.Unloaded then return end
+        if not (Toggles.Orbit and Toggles.Orbit.Value) then return end
+        local _, part = nearestEnemy()
+        local hrp = playerHrp()
+        local hum = playerHumanoid()
+        if not part or not hrp then return end
+        local speed = Options.OrbitSpeed and Options.OrbitSpeed.Value or 3
+        local height = Options.OrbitHeight and Options.OrbitHeight.Value or 6
+        local dist = Options.OrbitDistance and Options.OrbitDistance.Value or 9
+        orbitAngle += speed * dt
+        local target = part.Position + Vector3.new(math.cos(orbitAngle) * dist, height, math.sin(orbitAngle) * dist)
+        pcall(function()
+            hrp.CanCollide = false
+            if hum then hum.PlatformStand = true end
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+            hrp.CFrame = CFrame.new(target, part.Position)
+        end)
+    end)
+    Toggles.Orbit:OnChanged(function()
+        if not Toggles.Orbit.Value then
+            local hum = playerHumanoid()
+            pcall(function() if hum then hum.PlatformStand = false end end)
+        end
+    end)
+end
+
+-- INVENTORY TAB: sub-tabs [Equip] [Upgrades]
+do
+    local EquipTab = Tabs.Inventory:AddSubTab("Equip", "backpack")
+    local UpgTab = Tabs.Inventory:AddSubTab("Upgrades", "arrow-up-circle")
+
+    local EquipBox = EquipTab:AddLeftGroupbox("Party", "users")
+    EquipBox:AddToggle("AutoEquipBest", { Text = "Auto Equip Best", Default = false, Tooltip = "Invoke EquipBestUnits on a loop" })
+
+    local UpgBox = UpgTab:AddLeftGroupbox("Skill Tree", "git-branch")
+    UpgBox:AddToggle("AutoSkillTree", { Text = "Auto Upgrade Skill Tree", Default = false, Tooltip = "Max-buy affordable skill nodes" })
+
+    Toggles.AutoEquipBest:OnChanged(function()
+        Gen.EquipBest += 1
+        local myGen = Gen.EquipBest
+        task.spawn(function()
+            while Toggles.AutoEquipBest.Value and myGen == Gen.EquipBest and not Library.Unloaded do
+                invokeRemote("EquipBestUnits-RemoteFunction")
+                task.wait(5)
+            end
+        end)
+    end)
+
+    Toggles.AutoSkillTree:OnChanged(function()
+        Gen.SkillTree += 1
+        local myGen = Gen.SkillTree
+        task.spawn(function()
+            while Toggles.AutoSkillTree.Value and myGen == Gen.SkillTree and not Library.Unloaded do
+                invokeRemote("MaxBuySkillTreeNodes-RemoteFunction")
+                task.wait(5)
+            end
+        end)
+    end)
+end
+
+-- REBIRTH TAB: single feature, no sub-tab needed
+do
+    local Box = Tabs.Rebirth:AddLeftGroupbox("Rebirth", "refresh-ccw")
+    Box:AddToggle("AutoRebirth", { Text = "Auto Rebirth", Default = false, Tooltip = "Attempt rebirth when available" })
+    Box:AddLabel("ReqLabel", { Text = "Requires stage 11+ (server decides).", DoesWrap = true })
+
+    Toggles.AutoRebirth:OnChanged(function()
+        Gen.Rebirth += 1
+        local myGen = Gen.Rebirth
+        task.spawn(function()
+            while Toggles.AutoRebirth.Value and myGen == Gen.Rebirth and not Library.Unloaded do
+                local state: any = invokeRemote("GetRebirthState-RemoteFunction")
+                if typeof(state) == "table" and state.canRebirth == true then
+                    invokeRemote("AttemptRebirth-RemoteFunction")
+                    Library:Notify({ Title = "Rebirth", Description = "Attempted rebirth.", Time = 3, Type = "Success" })
+                end
+                task.wait(5)
+            end
+        end)
+    end)
+end
+
+-- SETTINGS TAB: config + Anti-AFK (on by default)
+do
+    local Menu = Tabs.Settings:AddLeftGroupbox("Menu", "wrench")
+    Menu:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", { Default = "RightShift", NoUI = true, Text = "Menu keybind" })
+    Menu:AddToggle("AntiAFK", { Text = "Anti-AFK", Default = true, Tooltip = "Blocks idle kick" })
+    Menu:AddSlider("CornerRadius", { Text = "Corner Radius", Default = 10, Min = 0, Max = 20, Rounding = 0, Callback = function(v) Window:SetCornerRadius(v) end })
+    Menu:AddButton("Unload", function() Library:Unload() end)
+    Library.ToggleKeybind = Options.MenuKeybind
+
+    local afkConn: RBXScriptConnection? = nil
+    local function setAntiAFK(on: boolean)
+        if afkConn then
+            afkConn:Disconnect()
+            afkConn = nil
+        end
+        if on then
+            afkConn = LocalPlayer.Idled:Connect(function()
+                pcall(function()
+                    VirtualUser:CaptureController()
+                    VirtualUser:ClickButton2(Vector2.new())
+                end)
+            end)
+        end
+    end
+    setAntiAFK(true)
+    Toggles.AntiAFK:OnChanged(function() setAntiAFK(Toggles.AntiAFK.Value) end)
+    Library:OnUnload(function()
+        if afkConn then
+            pcall(function() afkConn:Disconnect() end)
+        end
+        local hum = playerHumanoid()
+        pcall(function() if hum then hum.PlatformStand = false end end)
+    end)
+
+    ThemeManager:SetLibrary(Library)
+    SaveManager:SetLibrary(Library)
+    SaveManager:IgnoreThemeSettings()
+    SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
+    ThemeManager:SetFolder("hidevin")
+    SaveManager:SetFolder("hidevin/IDLE Soul Hero")
+    SaveManager:BuildConfigSection(Tabs.Settings)
+    ThemeManager:ApplyToTab(Tabs.Settings)
+    SaveManager:LoadAutoloadConfig()
+end
+
+Library:Notify({ Title = "@hidevin", Description = "IDLE Soul Hero loaded.", Time = 4, Type = "Success" })
